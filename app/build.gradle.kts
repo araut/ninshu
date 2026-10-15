@@ -1,7 +1,23 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+val localConfig = Properties().apply {
+    val configFile = rootProject.file("local.properties")
+    if (configFile.exists()) {
+        configFile.inputStream().use { load(it) }
+    }
+}
+
+fun buildConfigString(value: String): String =
+    "\"" + value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n") + "\""
 
 android {
     namespace = "com.araut.ninshu"
@@ -17,6 +33,22 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField(
+            "String",
+            "AGORA_APP_ID",
+            buildConfigString(localConfig.getProperty("AGORA_APP_ID", ""))
+        )
+        buildConfigField(
+            "String",
+            "AGORA_RTC_TOKEN",
+            buildConfigString(localConfig.getProperty("AGORA_RTC_TOKEN", ""))
+        )
+        buildConfigField(
+            "String",
+            "AGORA_UID",
+            buildConfigString(localConfig.getProperty("AGORA_UID", "1001"))
+        )
     }
 
     buildTypes {
@@ -32,6 +64,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -44,6 +77,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation("io.agora.rtc:full-sdk:4.7.0")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
