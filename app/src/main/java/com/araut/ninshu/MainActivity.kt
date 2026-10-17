@@ -3,6 +3,7 @@ package com.araut.ninshu
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,13 +19,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.araut.ninshu.ui.theme.NinshuTheme
-
 import io.agora.rtc2.ChannelMediaOptions
 import io.agora.rtc2.Constants
 import io.agora.rtc2.IRtcEngineEventHandler
 import io.agora.rtc2.RtcEngine
 import io.agora.rtc2.RtcEngineConfig
+import io.agora.rtc2.audio.AudioTrackConfig
 import io.agora.rtc2.video.VideoCanvas
 
 class MainActivity : ComponentActivity() {
@@ -38,10 +40,13 @@ class MainActivity : ComponentActivity() {
     private var permissionPending by mutableStateOf(false)
     private var joined by mutableStateOf(false)
     private var remoteUid by mutableStateOf<Int?>(null)
-    private var microphoneMuted by mutableStateOf(false)
+    private var sendingSpeech by mutableStateOf(false)
 
     private var engine by mutableStateOf<RtcEngine?>(null)
+    private var customAudioTrackId = -1
     private var session = 0
+
+    private lateinit var voiceSpeechSender: VoiceSpeechSender
 
     private val channelName = "ninshu-dev"
 
@@ -66,9 +71,22 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        voiceSpeechSender = VoiceSpeechSender(
+            context = this,
+            scope = lifecycleScope,
+            report = { message ->
+                status = message
+                Log.d("NinshuSpeech", message)
+
+            },
+            setBusy = { sendingSpeech = it }
+        )
+
         setContent {
             NinshuTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
+                Scaffold(
+                    modifier = Modifier.fillMaxSize()
+                ) { padding ->
                     CallScreen(
                         modifier = Modifier.padding(padding)
                     )
@@ -78,10 +96,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun hasPermissions(): Boolean =
-        requiredPermissions.all {
+        requiredPermissions.all { permission ->
             ContextCompat.checkSelfPermission(
                 this,
-                it
+                permission
             ) == PackageManager.PERMISSION_GRANTED
         }
 
@@ -96,19 +114,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // SDK events may arrive off the main thread.
-    // Ignore events from a call that has already been closed.
     private fun updateSession(
         expectedSession: Int,
         update: () -> Unit
     ) {
         runOnUiThread {
-            if (session == expectedSession) update()
+            if (
+                session == expectedSession &&
+                !isFinishing &&
+                !isDestroyed
+            ) {
+                update()
+            }
         }
     }
 
     private fun checkResult(operation: String, result: Int) {
-        check(result == 0) { "$operation failed: $result" }
+        check(result == 0) {
+            "$operation failed: $result"
+        }
     }
 
     private fun joinCall() {
@@ -118,19 +142,27 @@ class MainActivity : ComponentActivity() {
         val rtcToken = token.trim()
         val uid = uidInput.trim().toIntOrNull()
 
-        if (id.length != 32 || rtcToken.isBlank() ||
-            uid == null || uid <= 0
+        if (
+            id.length != 32 ||
+            rtcToken.isBlank() ||
+            uid == null ||
+            uid <= 0
         ) {
-            status = "Enter a valid App ID, token, and positive numeric UID."
+            status =
+                "Enter a valid App ID, token, and positive numeric UID."
             return
         }
 
         busy = true
+        joined = false
+        remoteUid = null
         status = "Connecting…"
+
         val currentSession = ++session
 
         try {
             val handler = object : IRtcEngineEventHandler() {
+
                 override fun onJoinChannelSuccess(
                     channel: String?,
                     uid: Int,
@@ -142,16 +174,26 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                override fun onUserJoined(uid: Int, elapsed: Int) {
+                override fun onUserJoined(
+                    uid: Int,
+                    elapsed: Int
+                ) {
                     updateSession(currentSession) {
                         remoteUid = uid
                         status = "Participant $uid joined"
                     }
                 }
 
-                override fun onUserOffline(uid: Int, reason: Int) {
+                override fun onUserOffline(
+                    uid: Int,
+                    reason: Int
+                ) {
                     updateSession(currentSession) {
-                        if (remoteUid == uid) remoteUid = null
+                        if (remoteUid == uid) {
+                            remoteUid = null
+                            voiceSpeechSender.cancel()
+                        }
+
                         status = "Participant $uid left"
                     }
                 }
@@ -161,25 +203,39 @@ class MainActivity : ComponentActivity() {
                     reason: Int
                 ) {
                     updateSession(currentSession) {
-                        status = when (state) {
-                            Constants.CONNECTION_STATE_CONNECTED ->
-                                "Connected to $channelName"
+                        when (state) {
+                            Constants.CONNECTION_STATE_CONNECTED -> {
+                                status = "Connected to $channelName"
+                            }
 
-                            Constants.CONNECTION_STATE_RECONNECTING ->
-                                "Reconnecting…"
+                            Constants.CONNECTION_STATE_RECONNECTING -> {
+                                voiceSpeechSender.cancel()
+                                status = "Reconnecting…"
+                            }
 
-                            Constants.CONNECTION_STATE_FAILED ->
-                                "Connection failed ($reason). Leave and retry."
+                            Constants.CONNECTION_STATE_FAILED -> {
+                                voiceSpeechSender.cancel()
+                                joined = false
+                                status =
+                                    "Connection failed ($reason). " +
+                                            "Leave and retry."
+                            }
 
-                            else ->
-                                "Connection state: $state, reason: $reason"
+                            else -> {
+                                status =
+                                    "Connection state: $state, " +
+                                            "reason: $reason"
+                            }
                         }
                     }
                 }
 
-                override fun onTokenPrivilegeWillExpire(token: String?) {
+                override fun onTokenPrivilegeWillExpire(
+                    token: String?
+                ) {
                     updateSession(currentSession) {
-                        status = "Token expiring. Leave and enter a new token."
+                        status =
+                            "Token expiring. Leave and enter a new token."
                     }
                 }
 
@@ -199,19 +255,52 @@ class MainActivity : ComponentActivity() {
             val rtc = RtcEngine.create(config)
             engine = rtc
 
-            checkResult("enableVideo", rtc.enableVideo())
+            checkResult(
+                "enableVideo",
+                rtc.enableVideo()
+            )
+
+            customAudioTrackId = rtc.createCustomAudioTrack(
+                Constants.AudioTrackType.AUDIO_TRACK_DIRECT,
+                AudioTrackConfig().apply {
+                    enableLocalPlayback = false
+                }
+            )
+
+            check(customAudioTrackId != -1) {
+                "Unable to create custom audio track."
+            }
+
+            // This milestone publishes generated speech only.
+            // Stop capturing the physical microphone.
+            checkResult(
+                "disable microphone capture",
+                rtc.enableLocalAudio(false)
+            )
 
             val options = ChannelMediaOptions().apply {
-                channelProfile = Constants.CHANNEL_PROFILE_COMMUNICATION
+                channelProfile =
+                    Constants.CHANNEL_PROFILE_COMMUNICATION
+
                 publishCameraTrack = true
-                publishMicrophoneTrack = true
+                publishMicrophoneTrack = false
+
+                publishCustomAudioTrack = true
+                publishCustomAudioTrackId = customAudioTrackId
+
+                enableAudioRecordingOrPlayout = true
                 autoSubscribeAudio = true
                 autoSubscribeVideo = true
             }
 
             checkResult(
                 "joinChannel",
-                rtc.joinChannel(rtcToken, channelName, uid, options)
+                rtc.joinChannel(
+                    rtcToken,
+                    channelName,
+                    uid,
+                    options
+                )
             )
         } catch (exception: Exception) {
             closeCall()
@@ -219,39 +308,83 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun sendVoiceTest() {
+        val rtc = engine ?: return
+
+        if (
+            !joined ||
+            remoteUid == null ||
+            sendingSpeech ||
+            customAudioTrackId == -1
+        ) {
+            return
+        }
+
+        voiceSpeechSender.send(
+            rtc = rtc,
+            customTrackId = customAudioTrackId,
+            text = BuildConfig.SPEECH_TEST_TEXT
+        )
+    }
+
     private fun closeCall() {
-        // Invalidate pending callbacks before destroying the engine.
+        // Cancel pending synthesis and audio pushes before
+        // releasing the Agora engine.
+        voiceSpeechSender.cancel()
+
+        // Ignore callbacks queued by the previous session.
         session++
 
         val rtc = engine
+        val trackId = customAudioTrackId
+
         engine = null
+        customAudioTrackId = -1
+
         busy = false
         joined = false
         remoteUid = null
-        microphoneMuted = false
+        sendingSpeech = false
 
         if (rtc != null) {
-            rtc.stopPreview()
-            rtc.leaveChannel()
-            RtcEngine.destroy()
+            try {
+                rtc.stopPreview()
+                rtc.leaveChannel()
+
+                if (trackId != -1) {
+                    rtc.destroyCustomAudioTrack(trackId)
+                }
+            } finally {
+                RtcEngine.destroy()
+            }
         }
 
         status = "Call ended"
     }
 
     override fun onStop() {
-        // Foreground-only prototype: release camera/mic on backgrounding.
-        if (engine != null) closeCall()
+        // Foreground-only prototype.
+        // Release camera and audio resources when backgrounded.
+        if (engine != null) {
+            closeCall()
+        }
+
         super.onStop()
     }
 
     override fun onDestroy() {
-        if (engine != null) closeCall()
+        if (engine != null) {
+            closeCall()
+        }
+
+        voiceSpeechSender.shutdown()
         super.onDestroy()
     }
 
     @Composable
-    private fun CallScreen(modifier: Modifier = Modifier) {
+    private fun CallScreen(
+        modifier: Modifier = Modifier
+    ) {
         Column(
             modifier = modifier
                 .fillMaxSize()
@@ -279,7 +412,8 @@ class MainActivity : ComponentActivity() {
                 value = token,
                 onValueChange = { token = it },
                 label = { Text("Temporary RTC token") },
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation =
+                    PasswordVisualTransformation(),
                 enabled = !busy && !permissionPending,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -294,14 +428,25 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             )
 
-            Text(status)
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodyMedium
+            )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Button(
                     onClick = { requestJoin() },
                     enabled = !busy && !permissionPending
                 ) {
-                    Text(if (permissionPending) "Permissions…" else "Join")
+                    Text(
+                        if (permissionPending) {
+                            "Permissions…"
+                        } else {
+                            "Join"
+                        }
+                    )
                 }
 
                 OutlinedButton(
@@ -310,22 +455,30 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text("Leave")
                 }
-
-                OutlinedButton(
-                    enabled = joined,
-                    onClick = {
-                        val muted = !microphoneMuted
-                        val result = engine?.muteLocalAudioStream(muted)
-                        if (result == 0) {
-                            microphoneMuted = muted
-                        } else {
-                            status = "Unable to change microphone: $result"
-                        }
-                    }
-                ) {
-                    Text(if (microphoneMuted) "Unmute" else "Mute")
-                }
             }
+
+            Button(
+                onClick = { sendVoiceTest() },
+                enabled = joined &&
+                        remoteUid != null &&
+                        !sendingSpeech,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (sendingSpeech) {
+                        "Sending…"
+                    } else {
+                        "Send Voice test"
+                    }
+                )
+            }
+
+            Text(
+                text =
+                    "Test mode: microphone audio is not transmitted. " +
+                            "Generated speech is sent to the other phone.",
+                style = MaterialTheme.typography.bodySmall
+            )
 
             val rtc = engine
 
@@ -346,6 +499,7 @@ class MainActivity : ComponentActivity() {
                                         0
                                     )
                                 )
+
                                 rtc.startPreview()
                             }
                         }

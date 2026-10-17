@@ -8,7 +8,7 @@ plugins {
 val localConfig = Properties().apply {
     val configFile = rootProject.file("local.properties")
     if (configFile.exists()) {
-        configFile.inputStream().use { load(it) }
+        configFile.reader(Charsets.UTF_8).use { load(it) }
     }
 }
 
@@ -27,7 +27,7 @@ android {
 
     defaultConfig {
         applicationId = "com.araut.ninshu"
-        minSdk = 31
+        minSdk = 30
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
@@ -48,6 +48,14 @@ android {
             "String",
             "AGORA_UID",
             buildConfigString(localConfig.getProperty("AGORA_UID", "1001"))
+        )
+
+        buildConfigField(
+            "String",
+            "SPEECH_TEST_TEXT",
+            buildConfigString(
+                localConfig.getProperty("SPEECH_TEST_TEXT", "")
+            )
         )
     }
 
