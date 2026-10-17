@@ -85,6 +85,20 @@ android {
                 }
             )
         )
+
+        buildConfigField(
+            "String",
+            "SPEECH_RECOGNITION_LANGUAGE",
+            buildConfigString(
+                requireNotNull(
+                    localConfig.getProperty("SPEECH_RECOGNITION_LANGUAGE")
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                ) {
+                    "Set SPEECH_RECOGNITION_LANGUAGE in local.properties"
+                }
+            )
+        )
     }
 
     buildTypes {

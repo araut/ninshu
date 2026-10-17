@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import io.agora.rtc2.Constants
 import io.agora.rtc2.RtcEngine
 import kotlinx.coroutines.*
@@ -64,7 +65,6 @@ class VoiceSpeechSender(
     init {
         tts.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
-
                 override fun onStart(utteranceId: String?) = Unit
 
                 override fun onBeginSynthesis(
@@ -107,10 +107,10 @@ class VoiceSpeechSender(
                         if (id != activeId) return
 
                         CapturedAudio(
-                            bytes = audio.toByteArray(),
-                            rate = sampleRate,
-                            encoding = encoding,
-                            channels = channels
+                            audio.toByteArray(),
+                            sampleRate,
+                            encoding,
+                            channels
                         )
                     }
 
@@ -123,10 +123,7 @@ class VoiceSpeechSender(
 
                 @Deprecated("Required by Android TTS")
                 override fun onError(utteranceId: String?) {
-                    fail(
-                        utteranceId,
-                        "Speech synthesis failed."
-                    )
+                    fail(utteranceId, "Speech synthesis failed.")
                 }
 
                 override fun onError(
@@ -174,7 +171,7 @@ class VoiceSpeechSender(
                         !it.features.orEmpty().contains("notInstalled")
             }
             ?.sortedWith(
-                compareByDescending<android.speech.tts.Voice> {
+                compareByDescending<Voice> {
                     it.locale.toLanguageTag().equals(
                         targetLocale.toLanguageTag(),
                         ignoreCase = true
@@ -229,11 +226,9 @@ class VoiceSpeechSender(
             delay(20_000)
 
             if (activeId == id) {
-                // Invalidate callbacks before stopping synthesis.
                 synchronized(lock) {
                     activeId = null
                 }
-
                 tts.stop()
                 finish("Speech synthesis timed out. Try again.")
             }
@@ -269,10 +264,7 @@ class VoiceSpeechSender(
                     if (activeId != id) return@launch
 
                     val frame = ByteArray(frameBytes)
-                    val count = min(
-                        frameBytes,
-                        pcm.size - offset
-                    )
+                    val count = min(frameBytes, pcm.size - offset)
 
                     pcm.copyInto(
                         frame,
@@ -298,9 +290,7 @@ class VoiceSpeechSender(
                     delay(10)
                 }
 
-                finish(
-                    "Audio sent. Confirm it on the other phone."
-                )
+                finish("Audio sent. Confirm it on the other phone.")
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
@@ -313,18 +303,14 @@ class VoiceSpeechSender(
         }
     }
 
-    private fun toMono48k(
-        source: CapturedAudio
-    ): ByteArray {
+    private fun toMono48k(source: CapturedAudio): ByteArray {
         require(
             source.encoding == AudioFormat.ENCODING_PCM_16BIT
         ) {
             "This prototype requires a voice producing 16-bit PCM."
         }
 
-        require(
-            source.rate > 0 && source.channels in 1..2
-        ) {
+        require(source.rate > 0 && source.channels in 1..2) {
             "Unsupported TTS sample rate or channel count."
         }
 
@@ -342,8 +328,7 @@ class VoiceSpeechSender(
             .order(ByteOrder.LITTLE_ENDIAN)
             .asShortBuffer()
 
-        val frameCount =
-            samples.remaining() / source.channels
+        val frameCount = samples.remaining() / source.channels
 
         require(frameCount > 0) {
             "The TTS engine returned no complete audio frames."
@@ -370,12 +355,8 @@ class VoiceSpeechSender(
             .order(ByteOrder.LITTLE_ENDIAN)
 
         repeat(outputCount) { index ->
-            val position =
-                index.toDouble() * source.rate / 48_000
-
-            val left = position.toInt()
-                .coerceAtMost(mono.lastIndex)
-
+            val position = index.toDouble() * source.rate / 48_000
+            val left = position.toInt().coerceAtMost(mono.lastIndex)
             val right = min(left + 1, mono.lastIndex)
             val fraction = (position - left).toFloat()
 
@@ -392,10 +373,7 @@ class VoiceSpeechSender(
         return output.array()
     }
 
-    private fun fail(
-        id: String?,
-        message: String
-    ) {
+    private fun fail(id: String?, message: String) {
         if (id == null) return
 
         main.post {
@@ -428,7 +406,6 @@ class VoiceSpeechSender(
 
         sendJob?.cancel()
         sendJob = null
-
         tts.stop()
         engine = null
         trackId = -1

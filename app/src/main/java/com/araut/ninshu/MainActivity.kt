@@ -35,6 +35,12 @@ class MainActivity : ComponentActivity() {
     private var token by mutableStateOf(BuildConfig.AGORA_RTC_TOKEN)
     private var uidInput by mutableStateOf(BuildConfig.AGORA_UID)
 
+    private val sourceLanguage =
+        BuildConfig.TRANSLATION_SOURCE_LANGUAGE.trim()
+    private val targetLanguage =
+        BuildConfig.TRANSLATION_TARGET_LANGUAGE.trim()
+    private val channelName = "ninshu-dev"
+
     private var status by mutableStateOf("Ready")
     private var busy by mutableStateOf(false)
     private var permissionPending by mutableStateOf(false)
@@ -48,28 +54,24 @@ class MainActivity : ComponentActivity() {
     private var session = 0
 
     private lateinit var voiceSpeechSender: VoiceSpeechSender
+    private lateinit var speechRecognizer: OnDeviceSpeechRecognizer
+
+    private var recognitionActive by mutableStateOf(false)
+    private var recognitionStatus by mutableStateOf(
+        "Ready for speech input."
+    )
 
     private val onDeviceTranslator = OnDeviceTranslator()
-
     private var modelReady by mutableStateOf(false)
     private var preparingModel by mutableStateOf(false)
     private var translating by mutableStateOf(false)
     private var sourceText by mutableStateOf("")
     private var translatedText by mutableStateOf("")
-
     private var translationStatus by mutableStateOf(
         "Prepare the translation model over Wi-Fi."
     )
 
     private var translationRequest = 0
-
-    private val channelName = "ninshu-dev"
-
-    private val sourceLanguage =
-        BuildConfig.TRANSLATION_SOURCE_LANGUAGE.trim()
-
-    private val targetLanguage =
-        BuildConfig.TRANSLATION_TARGET_LANGUAGE.trim()
 
     private val requiredPermissions = arrayOf(
         Manifest.permission.CAMERA,
@@ -102,24 +104,35 @@ class MainActivity : ComponentActivity() {
             setBusy = { sendingSpeech = it }
         )
 
+        speechRecognizer = OnDeviceSpeechRecognizer(
+            context = this,
+            report = { message ->
+                recognitionStatus = message
+                Log.d("NinshuRecognition", message)
+            },
+            setActive = { recognitionActive = it },
+            onTranscript = { transcript ->
+                sourceText = transcript
+                translatedText = ""
+            }
+        )
+
         setContent {
             NinshuTheme {
                 Scaffold(
                     modifier = Modifier.fillMaxSize()
                 ) { padding ->
-                    CallScreen(
-                        modifier = Modifier.padding(padding)
-                    )
+                    CallScreen(Modifier.padding(padding))
                 }
             }
         }
     }
 
     private fun hasPermissions(): Boolean =
-        requiredPermissions.all { permission ->
+        requiredPermissions.all {
             ContextCompat.checkSelfPermission(
                 this,
-                permission
+                it
             ) == PackageManager.PERMISSION_GRANTED
         }
 
@@ -149,16 +162,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkResult(
-        operation: String,
-        result: Int
-    ) {
+    private fun checkResult(operation: String, result: Int) {
         check(result == 0) {
             "$operation failed: $result"
         }
     }
 
     private fun cancelPendingSpeech() {
+        speechRecognizer.cancel()
         translationRequest++
 
         if (translating) {
@@ -198,7 +209,6 @@ class MainActivity : ComponentActivity() {
 
         try {
             val handler = object : IRtcEngineEventHandler() {
-
                 override fun onJoinChannelSuccess(
                     channel: String?,
                     uid: Int,
@@ -211,26 +221,19 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                override fun onUserJoined(
-                    uid: Int,
-                    elapsed: Int
-                ) {
+                override fun onUserJoined(uid: Int, elapsed: Int) {
                     updateSession(currentSession) {
                         remoteUid = uid
                         status = "Participant $uid joined"
                     }
                 }
 
-                override fun onUserOffline(
-                    uid: Int,
-                    reason: Int
-                ) {
+                override fun onUserOffline(uid: Int, reason: Int) {
                     updateSession(currentSession) {
                         if (remoteUid == uid) {
                             remoteUid = null
                             cancelPendingSpeech()
                         }
-
                         status = "Participant $uid left"
                     }
                 }
@@ -303,10 +306,7 @@ class MainActivity : ComponentActivity() {
             val rtc = RtcEngine.create(config)
             engine = rtc
 
-            checkResult(
-                "enableVideo",
-                rtc.enableVideo()
-            )
+            checkResult("enableVideo", rtc.enableVideo())
 
             customAudioTrackId = rtc.createCustomAudioTrack(
                 Constants.AudioTrackType.AUDIO_TRACK_DIRECT,
@@ -319,6 +319,8 @@ class MainActivity : ComponentActivity() {
                 "Unable to create custom audio track."
             }
 
+            // Agora does not capture or publish the physical microphone.
+            // The speech recognizer captures it when requested.
             checkResult(
                 "disable microphone capture",
                 rtc.enableLocalAudio(false)
@@ -330,10 +332,8 @@ class MainActivity : ComponentActivity() {
 
                 publishCameraTrack = true
                 publishMicrophoneTrack = false
-
                 publishCustomAudioTrack = true
                 publishCustomAudioTrackId = customAudioTrackId
-
                 enableAudioRecordingOrPlayout = true
                 autoSubscribeAudio = true
                 autoSubscribeVideo = true
@@ -341,12 +341,7 @@ class MainActivity : ComponentActivity() {
 
             checkResult(
                 "joinChannel",
-                rtc.joinChannel(
-                    rtcToken,
-                    channelName,
-                    uid,
-                    options
-                )
+                rtc.joinChannel(rtcToken, channelName, uid, options)
             )
         } catch (exception: Exception) {
             closeCall()
@@ -358,15 +353,29 @@ class MainActivity : ComponentActivity() {
         joined &&
                 connected &&
                 remoteUid != null &&
+                !recognitionActive &&
                 !translating &&
                 !sendingSpeech &&
                 customAudioTrackId != -1
+
+
+
+    private fun startSpeechInput() {
+        if (!canSendSpeech()) return
+
+        val language = BuildConfig.SPEECH_RECOGNITION_LANGUAGE.trim()
+
+        Log.d("NinshuRecognition", "Requested speech locale: $language")
+        speechRecognizer.start(language)
+    }
 
     private fun sendVoiceTest() {
         val rtc = engine ?: return
         if (!canSendSpeech()) return
 
-        if (BuildConfig.SPEECH_TEST_TEXT.isBlank()) {
+        val text = BuildConfig.SPEECH_TEST_TEXT
+
+        if (text.isBlank()) {
             status =
                 "Set SPEECH_TEST_TEXT in local.properties and rebuild."
             return
@@ -375,7 +384,7 @@ class MainActivity : ComponentActivity() {
         voiceSpeechSender.send(
             rtc = rtc,
             customTrackId = customAudioTrackId,
-            text = BuildConfig.SPEECH_TEST_TEXT
+            text = text
         )
     }
 
@@ -411,7 +420,7 @@ class MainActivity : ComponentActivity() {
         val input = sourceText.trim()
 
         if (input.isBlank()) {
-            translationStatus = "Enter a sentence first."
+            translationStatus = "Enter or speak a sentence first."
             return
         }
 
@@ -483,7 +492,6 @@ class MainActivity : ComponentActivity() {
 
         engine = null
         customAudioTrackId = -1
-
         busy = false
         joined = false
         connected = false
@@ -507,6 +515,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        speechRecognizer.cancel()
+
         if (engine != null) {
             closeCall()
         }
@@ -519,6 +529,7 @@ class MainActivity : ComponentActivity() {
             closeCall()
         }
 
+        speechRecognizer.shutdown()
         voiceSpeechSender.shutdown()
         onDeviceTranslator.close()
 
@@ -526,9 +537,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun CallScreen(
-        modifier: Modifier = Modifier
-    ) {
+    private fun CallScreen(modifier: Modifier = Modifier) {
         Column(
             modifier = modifier
                 .fillMaxSize()
@@ -572,25 +581,17 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             )
 
-            Text(
-                text = status,
-                style = MaterialTheme.typography.bodyMedium
-            )
+            Text(status)
 
             Row(
-                horizontalArrangement =
-                    Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Button(
                     onClick = { requestJoin() },
                     enabled = !busy && !permissionPending
                 ) {
                     Text(
-                        if (permissionPending) {
-                            "Permissions…"
-                        } else {
-                            "Join"
-                        }
+                        if (permissionPending) "Permissions…" else "Join"
                     )
                 }
 
@@ -608,18 +609,14 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    if (sendingSpeech) {
-                        "Sending…"
-                    } else {
-                        "Send voice test"
-                    }
+                    if (sendingSpeech) "Sending…" else "Send voice test"
                 )
             }
 
             Text(
                 text =
-                    "Microphone audio is not transmitted. " +
-                            "Generated speech is sent to the other phone.",
+                    "Original microphone audio is not transmitted. " +
+                            "Only generated speech is sent.",
                 style = MaterialTheme.typography.bodySmall
             )
 
@@ -647,13 +644,43 @@ class MainActivity : ComponentActivity() {
 
             Text(translationStatus)
 
+            Text(
+                text = "Speech input",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Text(recognitionStatus)
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Button(
+                    onClick = { startSpeechInput() },
+                    enabled = canSendSpeech()
+                ) {
+                    Text("Start speaking")
+                }
+
+                OutlinedButton(
+                    onClick = { speechRecognizer.stop() },
+                    enabled = recognitionActive
+                ) {
+                    Text("Stop")
+                }
+            }
+
             OutlinedTextField(
                 value = sourceText,
-                onValueChange = { sourceText = it },
-                label = {
-                    Text("Enter text ($sourceLanguage)")
+                onValueChange = {
+                    sourceText = it
+                    translatedText = ""
                 },
-                enabled = !translating && !sendingSpeech,
+                label = {
+                    Text("Enter or recognize text ($sourceLanguage)")
+                },
+                enabled = !recognitionActive &&
+                        !translating &&
+                        !sendingSpeech,
                 minLines = 2,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -699,7 +726,6 @@ class MainActivity : ComponentActivity() {
                                         0
                                     )
                                 )
-
                                 rtc.startPreview()
                             }
                         }
