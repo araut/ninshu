@@ -3,6 +3,10 @@
 build/
 .kotlin/
 
+.DS_Store
+
+/app/src/main/assets/model-speech/
+
 # Local configuration file (sdk path, etc)
 local.properties
 

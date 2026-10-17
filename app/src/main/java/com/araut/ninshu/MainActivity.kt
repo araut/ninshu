@@ -37,8 +37,13 @@ class MainActivity : ComponentActivity() {
 
     private val sourceLanguage =
         BuildConfig.TRANSLATION_SOURCE_LANGUAGE.trim()
+
     private val targetLanguage =
         BuildConfig.TRANSLATION_TARGET_LANGUAGE.trim()
+
+    private val recognitionLanguage =
+        BuildConfig.SPEECH_RECOGNITION_LANGUAGE.trim()
+
     private val channelName = "ninshu-dev"
 
     private var status by mutableStateOf("Ready")
@@ -54,7 +59,7 @@ class MainActivity : ComponentActivity() {
     private var session = 0
 
     private lateinit var voiceSpeechSender: VoiceSpeechSender
-    private lateinit var speechRecognizer: OnDeviceSpeechRecognizer
+    private lateinit var speechRecognizer: SpeechInputEngine
 
     private var recognitionActive by mutableStateOf(false)
     private var recognitionStatus by mutableStateOf(
@@ -62,11 +67,13 @@ class MainActivity : ComponentActivity() {
     )
 
     private val onDeviceTranslator = OnDeviceTranslator()
+
     private var modelReady by mutableStateOf(false)
     private var preparingModel by mutableStateOf(false)
     private var translating by mutableStateOf(false)
     private var sourceText by mutableStateOf("")
     private var translatedText by mutableStateOf("")
+
     private var translationStatus by mutableStateOf(
         "Prepare the translation model over Wi-Fi."
     )
@@ -86,7 +93,8 @@ class MainActivity : ComponentActivity() {
         if (hasPermissions()) {
             joinCall()
         } else {
-            status = "Camera and microphone permissions are required."
+            status =
+                "Camera and microphone permissions are required."
         }
     }
 
@@ -104,7 +112,7 @@ class MainActivity : ComponentActivity() {
             setBusy = { sendingSpeech = it }
         )
 
-        speechRecognizer = OnDeviceSpeechRecognizer(
+        speechRecognizer = AutoSpeechRecognizer(
             context = this,
             report = { message ->
                 recognitionStatus = message
@@ -162,7 +170,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkResult(operation: String, result: Int) {
+    private fun checkResult(
+        operation: String,
+        result: Int
+    ) {
         check(result == 0) {
             "$operation failed: $result"
         }
@@ -209,6 +220,7 @@ class MainActivity : ComponentActivity() {
 
         try {
             val handler = object : IRtcEngineEventHandler() {
+
                 override fun onJoinChannelSuccess(
                     channel: String?,
                     uid: Int,
@@ -221,19 +233,26 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                override fun onUserJoined(uid: Int, elapsed: Int) {
+                override fun onUserJoined(
+                    uid: Int,
+                    elapsed: Int
+                ) {
                     updateSession(currentSession) {
                         remoteUid = uid
                         status = "Participant $uid joined"
                     }
                 }
 
-                override fun onUserOffline(uid: Int, reason: Int) {
+                override fun onUserOffline(
+                    uid: Int,
+                    reason: Int
+                ) {
                     updateSession(currentSession) {
                         if (remoteUid == uid) {
                             remoteUid = null
                             cancelPendingSpeech()
                         }
+
                         status = "Participant $uid left"
                     }
                 }
@@ -244,11 +263,13 @@ class MainActivity : ComponentActivity() {
                 ) {
                     updateSession(currentSession) {
                         connected =
-                            state == Constants.CONNECTION_STATE_CONNECTED
+                            state ==
+                                    Constants.CONNECTION_STATE_CONNECTED
 
                         when (state) {
                             Constants.CONNECTION_STATE_CONNECTED -> {
-                                status = "Connected to $channelName"
+                                status =
+                                    "Connected to $channelName"
                             }
 
                             Constants.CONNECTION_STATE_RECONNECTING -> {
@@ -292,7 +313,8 @@ class MainActivity : ComponentActivity() {
 
                 override fun onError(err: Int) {
                     updateSession(currentSession) {
-                        status = "Agora error: $err. Leave and retry."
+                        status =
+                            "Agora error: $err. Leave and retry."
                     }
                 }
             }
@@ -306,7 +328,10 @@ class MainActivity : ComponentActivity() {
             val rtc = RtcEngine.create(config)
             engine = rtc
 
-            checkResult("enableVideo", rtc.enableVideo())
+            checkResult(
+                "enableVideo",
+                rtc.enableVideo()
+            )
 
             customAudioTrackId = rtc.createCustomAudioTrack(
                 Constants.AudioTrackType.AUDIO_TRACK_DIRECT,
@@ -319,8 +344,8 @@ class MainActivity : ComponentActivity() {
                 "Unable to create custom audio track."
             }
 
-            // Agora does not capture or publish the physical microphone.
-            // The speech recognizer captures it when requested.
+            // Recognition owns microphone capture when requested.
+            // Agora publishes only synthesized speech.
             checkResult(
                 "disable microphone capture",
                 rtc.enableLocalAudio(false)
@@ -332,8 +357,10 @@ class MainActivity : ComponentActivity() {
 
                 publishCameraTrack = true
                 publishMicrophoneTrack = false
+
                 publishCustomAudioTrack = true
                 publishCustomAudioTrackId = customAudioTrackId
+
                 enableAudioRecordingOrPlayout = true
                 autoSubscribeAudio = true
                 autoSubscribeVideo = true
@@ -341,11 +368,17 @@ class MainActivity : ComponentActivity() {
 
             checkResult(
                 "joinChannel",
-                rtc.joinChannel(rtcToken, channelName, uid, options)
+                rtc.joinChannel(
+                    rtcToken,
+                    channelName,
+                    uid,
+                    options
+                )
             )
         } catch (exception: Exception) {
             closeCall()
-            status = exception.message ?: "Unable to start call."
+            status =
+                exception.message ?: "Unable to start call."
         }
     }
 
@@ -358,15 +391,10 @@ class MainActivity : ComponentActivity() {
                 !sendingSpeech &&
                 customAudioTrackId != -1
 
-
-
     private fun startSpeechInput() {
         if (!canSendSpeech()) return
 
-        val language = BuildConfig.SPEECH_RECOGNITION_LANGUAGE.trim()
-
-        Log.d("NinshuRecognition", "Requested speech locale: $language")
-        speechRecognizer.start(language)
+        speechRecognizer.start(recognitionLanguage)
     }
 
     private fun sendVoiceTest() {
@@ -420,7 +448,8 @@ class MainActivity : ComponentActivity() {
         val input = sourceText.trim()
 
         if (input.isBlank()) {
-            translationStatus = "Enter or speak a sentence first."
+            translationStatus =
+                "Enter or speak a sentence first."
             return
         }
 
@@ -440,7 +469,9 @@ class MainActivity : ComponentActivity() {
         onDeviceTranslator.translate(input)
             .addOnSuccessListener { result ->
                 updateSession(expectedSession) {
-                    if (translationRequest == expectedRequest) {
+                    if (
+                        translationRequest == expectedRequest
+                    ) {
                         translating = false
 
                         when {
@@ -464,7 +495,8 @@ class MainActivity : ComponentActivity() {
 
                                 voiceSpeechSender.send(
                                     rtc = rtc,
-                                    customTrackId = customAudioTrackId,
+                                    customTrackId =
+                                        customAudioTrackId,
                                     text = result
                                 )
                             }
@@ -474,7 +506,9 @@ class MainActivity : ComponentActivity() {
             }
             .addOnFailureListener { exception ->
                 updateSession(expectedSession) {
-                    if (translationRequest == expectedRequest) {
+                    if (
+                        translationRequest == expectedRequest
+                    ) {
                         translating = false
                         translationStatus =
                             "Translation failed: ${exception.message}"
@@ -492,6 +526,7 @@ class MainActivity : ComponentActivity() {
 
         engine = null
         customAudioTrackId = -1
+
         busy = false
         joined = false
         connected = false
@@ -537,13 +572,16 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun CallScreen(modifier: Modifier = Modifier) {
+    private fun CallScreen(
+        modifier: Modifier = Modifier
+    ) {
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement =
+                Arrangement.spacedBy(12.dp)
         ) {
             Text(
                 text = "Ninshu",
@@ -584,14 +622,19 @@ class MainActivity : ComponentActivity() {
             Text(status)
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement =
+                    Arrangement.spacedBy(12.dp)
             ) {
                 Button(
                     onClick = { requestJoin() },
                     enabled = !busy && !permissionPending
                 ) {
                     Text(
-                        if (permissionPending) "Permissions…" else "Join"
+                        if (permissionPending) {
+                            "Permissions…"
+                        } else {
+                            "Join"
+                        }
                     )
                 }
 
@@ -609,7 +652,11 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    if (sendingSpeech) "Sending…" else "Send voice test"
+                    if (sendingSpeech) {
+                        "Sending…"
+                    } else {
+                        "Send voice test"
+                    }
                 )
             }
 
@@ -649,10 +696,12 @@ class MainActivity : ComponentActivity() {
                 style = MaterialTheme.typography.titleMedium
             )
 
+            Text("Requested locale: $recognitionLanguage")
             Text(recognitionStatus)
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement =
+                    Arrangement.spacedBy(12.dp)
             ) {
                 Button(
                     onClick = { startSpeechInput() },
@@ -726,6 +775,7 @@ class MainActivity : ComponentActivity() {
                                         0
                                     )
                                 )
+
                                 rtc.startPreview()
                             }
                         }

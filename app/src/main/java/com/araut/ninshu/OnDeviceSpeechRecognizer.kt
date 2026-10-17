@@ -17,25 +17,24 @@ class OnDeviceSpeechRecognizer(
     context: Context,
     private val report: (String) -> Unit,
     private val setActive: (Boolean) -> Unit,
-    private val onTranscript: (String) -> Unit
-) {
+    private val onTranscript: (String) -> Unit,
+    private val onUnsupportedLanguage: () -> Unit = {}
+) : SpeechInputEngine {
+
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
 
     private var recognizer: SpeechRecognizer? = null
     private var generation = 0
     private var stopping = false
+    private var closed = false
     private var timeout: Runnable? = null
 
-    // All public methods must be called on the main thread.
-    fun start(languageTag: String) {
-        if (recognizer != null) return
+    override fun start(languageTag: String) {
+        if (closed || recognizer != null) return
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            report(
-                "This recognition implementation requires Android 12+. " +
-                        "Typed input remains available."
-            )
+            report("Android on-device recognition requires API 31+.")
             return
         }
 
@@ -52,7 +51,7 @@ class OnDeviceSpeechRecognizer(
         val language = languageTag.trim()
 
         if (language.isBlank()) {
-            report("Configure the source language in local.properties.")
+            report("Configure SPEECH_RECOGNITION_LANGUAGE.")
             return
         }
 
@@ -64,10 +63,8 @@ class OnDeviceSpeechRecognizer(
                     appContext
                 )
             ) {
-                report(
-                    "No on-device recognition service is available. " +
-                            "Typed input remains available."
-                )
+                report("Android on-device recognition is unavailable.")
+                onUnsupportedLanguage()
                 return
             }
 
@@ -128,12 +125,22 @@ class OnDeviceSpeechRecognizer(
 
                         release()
                         report(errorMessage(error))
+
+                        if (
+                            error ==
+                            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                            error ==
+                            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                        ) {
+                            onUnsupportedLanguage()
+                        }
                     }
 
                     override fun onRmsChanged(rmsdB: Float) = Unit
 
-                    override fun onBufferReceived(buffer: ByteArray?) =
-                        Unit
+                    override fun onBufferReceived(
+                        buffer: ByteArray?
+                    ) = Unit
 
                     override fun onPartialResults(
                         partialResults: Bundle?
@@ -172,12 +179,12 @@ class OnDeviceSpeechRecognizer(
             }
 
             setActive(true)
-            report("Starting on-device recognition…")
+            report("Starting on-device recognition ($language)…")
 
             timeout = Runnable {
                 if (generation == currentGeneration) {
                     cancel()
-                    report("Recognition timed out. Try a shorter sentence.")
+                    report("Recognition timed out. Try again.")
                 }
             }.also {
                 main.postDelayed(it, 30_000)
@@ -192,9 +199,9 @@ class OnDeviceSpeechRecognizer(
         }
     }
 
-    fun stop() {
+    override fun stop() {
         val speech = recognizer ?: return
-        if (stopping) return
+        if (closed || stopping) return
 
         stopping = true
         report("Finishing recognition…")
@@ -209,8 +216,7 @@ class OnDeviceSpeechRecognizer(
         }
     }
 
-    fun cancel() {
-        // Invalidate callbacks before cancelling the current request.
+    override fun cancel() {
         generation++
 
         try {
@@ -220,7 +226,9 @@ class OnDeviceSpeechRecognizer(
         }
     }
 
-    fun shutdown() {
+    override fun shutdown() {
+        if (closed) return
+        closed = true
         cancel()
     }
 
@@ -244,7 +252,7 @@ class OnDeviceSpeechRecognizer(
     private fun errorMessage(error: Int): String =
         when (error) {
             SpeechRecognizer.ERROR_AUDIO ->
-                "Microphone audio error. Check permissions and try again."
+                "Microphone audio error."
 
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                 "Microphone permission is required."
@@ -259,12 +267,10 @@ class OnDeviceSpeechRecognizer(
                 "Recognition service is busy. Try again."
 
             SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ->
-                "The configured source language is not supported " +
-                        "by this on-device recognition service."
+                "The source language is unsupported. Trying Vosk."
 
             SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                "The source language model is unavailable. " +
-                        "Download it through your recognition provider."
+                "The source language model is unavailable. Trying Vosk."
 
             else ->
                 "On-device recognition failed: $error"

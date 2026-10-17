@@ -99,6 +99,20 @@ android {
                 }
             )
         )
+
+        buildConfigField(
+            "String",
+            "VOSK_MODEL_ASSET",
+            buildConfigString(
+                requireNotNull(
+                    localConfig.getProperty("VOSK_MODEL_ASSET")
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                ) {
+                    "Set VOSK_MODEL_ASSET in local.properties"
+                }
+            )
+        )
     }
 
     buildTypes {
@@ -129,6 +143,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation("io.agora.rtc:full-sdk:4.7.0")
     implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
