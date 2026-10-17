@@ -57,6 +57,34 @@ android {
                 localConfig.getProperty("SPEECH_TEST_TEXT", "")
             )
         )
+
+        buildConfigField(
+            "String",
+            "TRANSLATION_SOURCE_LANGUAGE",
+            buildConfigString(
+                requireNotNull(
+                    localConfig.getProperty("TRANSLATION_SOURCE_LANGUAGE")
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                ) {
+                    "Set TRANSLATION_SOURCE_LANGUAGE in local.properties"
+                }
+            )
+        )
+
+        buildConfigField(
+            "String",
+            "TRANSLATION_TARGET_LANGUAGE",
+            buildConfigString(
+                requireNotNull(
+                    localConfig.getProperty("TRANSLATION_TARGET_LANGUAGE")
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                ) {
+                    "Set TRANSLATION_TARGET_LANGUAGE in local.properties"
+                }
+            )
+        )
     }
 
     buildTypes {
@@ -86,6 +114,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation("io.agora.rtc:full-sdk:4.7.0")
+    implementation("com.google.mlkit:translate:17.0.3")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

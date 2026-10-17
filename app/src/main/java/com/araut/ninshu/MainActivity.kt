@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
     private var busy by mutableStateOf(false)
     private var permissionPending by mutableStateOf(false)
     private var joined by mutableStateOf(false)
+    private var connected by mutableStateOf(false)
     private var remoteUid by mutableStateOf<Int?>(null)
     private var sendingSpeech by mutableStateOf(false)
 
@@ -48,7 +49,27 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var voiceSpeechSender: VoiceSpeechSender
 
+    private val onDeviceTranslator = OnDeviceTranslator()
+
+    private var modelReady by mutableStateOf(false)
+    private var preparingModel by mutableStateOf(false)
+    private var translating by mutableStateOf(false)
+    private var sourceText by mutableStateOf("")
+    private var translatedText by mutableStateOf("")
+
+    private var translationStatus by mutableStateOf(
+        "Prepare the translation model over Wi-Fi."
+    )
+
+    private var translationRequest = 0
+
     private val channelName = "ninshu-dev"
+
+    private val sourceLanguage =
+        BuildConfig.TRANSLATION_SOURCE_LANGUAGE.trim()
+
+    private val targetLanguage =
+        BuildConfig.TRANSLATION_TARGET_LANGUAGE.trim()
 
     private val requiredPermissions = arrayOf(
         Manifest.permission.CAMERA,
@@ -77,7 +98,6 @@ class MainActivity : ComponentActivity() {
             report = { message ->
                 status = message
                 Log.d("NinshuSpeech", message)
-
             },
             setBusy = { sendingSpeech = it }
         )
@@ -129,10 +149,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkResult(operation: String, result: Int) {
+    private fun checkResult(
+        operation: String,
+        result: Int
+    ) {
         check(result == 0) {
             "$operation failed: $result"
         }
+    }
+
+    private fun cancelPendingSpeech() {
+        translationRequest++
+
+        if (translating) {
+            translationStatus =
+                "Translation send cancelled because the call changed."
+        }
+
+        translating = false
+        voiceSpeechSender.cancel()
     }
 
     private fun joinCall() {
@@ -155,6 +190,7 @@ class MainActivity : ComponentActivity() {
 
         busy = true
         joined = false
+        connected = false
         remoteUid = null
         status = "Connecting…"
 
@@ -170,6 +206,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     updateSession(currentSession) {
                         joined = true
+                        connected = true
                         status = "Joined $channel as $uid"
                     }
                 }
@@ -191,7 +228,7 @@ class MainActivity : ComponentActivity() {
                     updateSession(currentSession) {
                         if (remoteUid == uid) {
                             remoteUid = null
-                            voiceSpeechSender.cancel()
+                            cancelPendingSpeech()
                         }
 
                         status = "Participant $uid left"
@@ -203,21 +240,32 @@ class MainActivity : ComponentActivity() {
                     reason: Int
                 ) {
                     updateSession(currentSession) {
+                        connected =
+                            state == Constants.CONNECTION_STATE_CONNECTED
+
                         when (state) {
                             Constants.CONNECTION_STATE_CONNECTED -> {
                                 status = "Connected to $channelName"
                             }
 
                             Constants.CONNECTION_STATE_RECONNECTING -> {
-                                voiceSpeechSender.cancel()
+                                cancelPendingSpeech()
                                 status = "Reconnecting…"
                             }
 
                             Constants.CONNECTION_STATE_FAILED -> {
-                                voiceSpeechSender.cancel()
+                                cancelPendingSpeech()
                                 joined = false
                                 status =
                                     "Connection failed ($reason). " +
+                                            "Leave and retry."
+                            }
+
+                            Constants.CONNECTION_STATE_DISCONNECTED -> {
+                                cancelPendingSpeech()
+                                joined = false
+                                status =
+                                    "Disconnected ($reason). " +
                                             "Leave and retry."
                             }
 
@@ -271,8 +319,6 @@ class MainActivity : ComponentActivity() {
                 "Unable to create custom audio track."
             }
 
-            // This milestone publishes generated speech only.
-            // Stop capturing the physical microphone.
             checkResult(
                 "disable microphone capture",
                 rtc.enableLocalAudio(false)
@@ -308,15 +354,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun canSendSpeech(): Boolean =
+        joined &&
+                connected &&
+                remoteUid != null &&
+                !translating &&
+                !sendingSpeech &&
+                customAudioTrackId != -1
+
     private fun sendVoiceTest() {
         val rtc = engine ?: return
+        if (!canSendSpeech()) return
 
-        if (
-            !joined ||
-            remoteUid == null ||
-            sendingSpeech ||
-            customAudioTrackId == -1
-        ) {
+        if (BuildConfig.SPEECH_TEST_TEXT.isBlank()) {
+            status =
+                "Set SPEECH_TEST_TEXT in local.properties and rebuild."
             return
         }
 
@@ -327,12 +379,103 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun closeCall() {
-        // Cancel pending synthesis and audio pushes before
-        // releasing the Agora engine.
-        voiceSpeechSender.cancel()
+    private fun prepareTranslation() {
+        if (preparingModel || modelReady) return
 
-        // Ignore callbacks queued by the previous session.
+        preparingModel = true
+        translationStatus =
+            "Preparing translation model over Wi-Fi…"
+
+        onDeviceTranslator.prepare()
+            .addOnSuccessListener {
+                if (!isDestroyed && !isFinishing) {
+                    preparingModel = false
+                    modelReady = true
+                    translationStatus =
+                        "On-device translation ready."
+                }
+            }
+            .addOnFailureListener { exception ->
+                if (!isDestroyed && !isFinishing) {
+                    preparingModel = false
+                    translationStatus =
+                        "Model preparation failed: ${exception.message}"
+                }
+            }
+    }
+
+    private fun translateAndSend() {
+        val rtc = engine ?: return
+        if (!canSendSpeech() || !modelReady) return
+
+        val input = sourceText.trim()
+
+        if (input.isBlank()) {
+            translationStatus = "Enter a sentence first."
+            return
+        }
+
+        if (input.length > 500) {
+            translationStatus =
+                "Use a sentence under 500 characters."
+            return
+        }
+
+        val expectedSession = session
+        val expectedRequest = ++translationRequest
+
+        translating = true
+        translatedText = ""
+        translationStatus = "Translating locally…"
+
+        onDeviceTranslator.translate(input)
+            .addOnSuccessListener { result ->
+                updateSession(expectedSession) {
+                    if (translationRequest == expectedRequest) {
+                        translating = false
+
+                        when {
+                            engine !== rtc ||
+                                    !joined ||
+                                    !connected ||
+                                    remoteUid == null -> {
+                                translationStatus =
+                                    "Call unavailable. Try again."
+                            }
+
+                            result.isBlank() -> {
+                                translationStatus =
+                                    "Translation returned no text."
+                            }
+
+                            else -> {
+                                translatedText = result
+                                translationStatus =
+                                    "Translation complete."
+
+                                voiceSpeechSender.send(
+                                    rtc = rtc,
+                                    customTrackId = customAudioTrackId,
+                                    text = result
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener { exception ->
+                updateSession(expectedSession) {
+                    if (translationRequest == expectedRequest) {
+                        translating = false
+                        translationStatus =
+                            "Translation failed: ${exception.message}"
+                    }
+                }
+            }
+    }
+
+    private fun closeCall() {
+        cancelPendingSpeech()
         session++
 
         val rtc = engine
@@ -343,6 +486,7 @@ class MainActivity : ComponentActivity() {
 
         busy = false
         joined = false
+        connected = false
         remoteUid = null
         sendingSpeech = false
 
@@ -363,8 +507,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        // Foreground-only prototype.
-        // Release camera and audio resources when backgrounded.
         if (engine != null) {
             closeCall()
         }
@@ -378,6 +520,8 @@ class MainActivity : ComponentActivity() {
         }
 
         voiceSpeechSender.shutdown()
+        onDeviceTranslator.close()
+
         super.onDestroy()
     }
 
@@ -434,7 +578,8 @@ class MainActivity : ComponentActivity() {
             )
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement =
+                    Arrangement.spacedBy(12.dp)
             ) {
                 Button(
                     onClick = { requestJoin() },
@@ -459,26 +604,81 @@ class MainActivity : ComponentActivity() {
 
             Button(
                 onClick = { sendVoiceTest() },
-                enabled = joined &&
-                        remoteUid != null &&
-                        !sendingSpeech,
+                enabled = canSendSpeech(),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     if (sendingSpeech) {
                         "Sending…"
                     } else {
-                        "Send Voice test"
+                        "Send voice test"
                     }
                 )
             }
 
             Text(
                 text =
-                    "Test mode: microphone audio is not transmitted. " +
+                    "Microphone audio is not transmitted. " +
                             "Generated speech is sent to the other phone.",
                 style = MaterialTheme.typography.bodySmall
             )
+
+            HorizontalDivider()
+
+            Text(
+                text = "On-device translation",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Text("$sourceLanguage → $targetLanguage")
+
+            OutlinedButton(
+                onClick = { prepareTranslation() },
+                enabled = !preparingModel && !modelReady
+            ) {
+                Text(
+                    when {
+                        modelReady -> "Model ready"
+                        preparingModel -> "Preparing…"
+                        else -> "Prepare translation"
+                    }
+                )
+            }
+
+            Text(translationStatus)
+
+            OutlinedTextField(
+                value = sourceText,
+                onValueChange = { sourceText = it },
+                label = {
+                    Text("Enter text ($sourceLanguage)")
+                },
+                enabled = !translating && !sendingSpeech,
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Button(
+                onClick = { translateAndSend() },
+                enabled = canSendSpeech() &&
+                        modelReady &&
+                        sourceText.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    when {
+                        translating -> "Translating…"
+                        sendingSpeech -> "Sending…"
+                        else -> "Translate and Send"
+                    }
+                )
+            }
+
+            if (translatedText.isNotBlank()) {
+                Text("Translated text: $translatedText")
+            }
+
+            HorizontalDivider()
 
             val rtc = engine
 

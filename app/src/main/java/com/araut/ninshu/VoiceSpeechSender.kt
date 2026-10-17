@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.min
 
@@ -27,9 +28,16 @@ class VoiceSpeechSender(
     private val outputFile = File(context.cacheDir, "voice-test.wav")
     private val lock = Any()
 
+    private val targetLocale = Locale.forLanguageTag(
+        BuildConfig.TRANSLATION_TARGET_LANGUAGE.trim()
+    )
+
     private var ready = false
     private var closed = false
+
+    @Volatile
     private var activeId: String? = null
+
     private var audio = ByteArrayOutputStream()
     private var sampleRate = 0
     private var encoding = 0
@@ -39,11 +47,16 @@ class VoiceSpeechSender(
     private var trackId = -1
     private var sendJob: Job? = null
 
-    private val tts = TextToSpeech(context.applicationContext) { result ->
+    private val tts = TextToSpeech(
+        context.applicationContext
+    ) { result ->
         main.post {
             if (!closed) {
                 ready = result == TextToSpeech.SUCCESS
-                if (!ready) report("Unable to initialize text-to-speech.")
+
+                if (!ready) {
+                    report("Unable to initialize text-to-speech.")
+                }
             }
         }
     }
@@ -51,6 +64,7 @@ class VoiceSpeechSender(
     init {
         tts.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
+
                 override fun onStart(utteranceId: String?) = Unit
 
                 override fun onBeginSynthesis(
@@ -60,7 +74,10 @@ class VoiceSpeechSender(
                     channelCount: Int
                 ) {
                     synchronized(lock) {
-                        if (utteranceId == activeId) {
+                        if (
+                            utteranceId != null &&
+                            utteranceId == activeId
+                        ) {
                             sampleRate = sampleRateInHz
                             encoding = audioFormat
                             channels = channelCount
@@ -73,33 +90,43 @@ class VoiceSpeechSender(
                     bytes: ByteArray?
                 ) {
                     synchronized(lock) {
-                        if (utteranceId == activeId && bytes != null) {
+                        if (
+                            utteranceId != null &&
+                            utteranceId == activeId &&
+                            bytes != null
+                        ) {
                             audio.write(bytes)
                         }
                     }
                 }
 
                 override fun onDone(utteranceId: String?) {
+                    val id = utteranceId ?: return
+
                     val captured = synchronized(lock) {
-                        if (utteranceId != activeId) return
+                        if (id != activeId) return
+
                         CapturedAudio(
-                            audio.toByteArray(),
-                            sampleRate,
-                            encoding,
-                            channels
+                            bytes = audio.toByteArray(),
+                            rate = sampleRate,
+                            encoding = encoding,
+                            channels = channels
                         )
                     }
 
                     main.post {
-                        if (utteranceId == activeId && !closed) {
-                            transmit(captured)
+                        if (id == activeId && !closed) {
+                            transmit(id, captured)
                         }
                     }
                 }
 
                 @Deprecated("Required by Android TTS")
                 override fun onError(utteranceId: String?) {
-                    fail(utteranceId, "Voice speech synthesis failed.")
+                    fail(
+                        utteranceId,
+                        "Speech synthesis failed."
+                    )
                 }
 
                 override fun onError(
@@ -108,7 +135,7 @@ class VoiceSpeechSender(
                 ) {
                     fail(
                         utteranceId,
-                        "Voice speech synthesis failed: $errorCode"
+                        "Speech synthesis failed: $errorCode"
                     )
                 }
             }
@@ -116,14 +143,25 @@ class VoiceSpeechSender(
     }
 
     // Call from the main thread.
-    fun send(rtc: RtcEngine, customTrackId: Int, text: String) {
+    fun send(
+        rtc: RtcEngine,
+        customTrackId: Int,
+        text: String
+    ) {
+        if (closed) return
+
         if (text.isBlank()) {
-            report("Set SPEECH_TEST_TEXT in local.properties and rebuild.")
+            report("No text to synthesize.")
+            return
+        }
+
+        if (text.length > TextToSpeech.getMaxSpeechInputLength()) {
+            report("Text exceeds the speech engine's input limit.")
             return
         }
 
         if (!ready) {
-            report("Text-to-speech is still initializing.")
+            report("Text-to-speech is not ready.")
             return
         }
 
@@ -131,20 +169,31 @@ class VoiceSpeechSender(
 
         val voice = tts.voices
             ?.filter {
-                it.locale.language == "hi" &&
+                it.locale.language == targetLocale.language &&
                         !it.isNetworkConnectionRequired &&
                         !it.features.orEmpty().contains("notInstalled")
             }
-            ?.sortedBy { it.name }
+            ?.sortedWith(
+                compareByDescending<android.speech.tts.Voice> {
+                    it.locale.toLanguageTag().equals(
+                        targetLocale.toLanguageTag(),
+                        ignoreCase = true
+                    )
+                }.thenBy { it.name }
+            )
             ?.firstOrNull()
 
         if (voice == null) {
-            report("Install an offline Language voice in Android TTS settings.")
+            report(
+                "Install an offline voice for " +
+                        "${targetLocale.toLanguageTag()} " +
+                        "in Android TTS settings."
+            )
             return
         }
 
         if (tts.setVoice(voice) != TextToSpeech.SUCCESS) {
-            report("Unable to select the offline language voice.")
+            report("Unable to select the offline voice.")
             return
         }
 
@@ -152,6 +201,7 @@ class VoiceSpeechSender(
         trackId = customTrackId
 
         val id = UUID.randomUUID().toString()
+
         synchronized(lock) {
             activeId = id
             audio = ByteArrayOutputStream()
@@ -161,9 +211,8 @@ class VoiceSpeechSender(
         }
 
         setBusy(true)
-        report("Generating Voice speech locally…")
+        report("Generating speech locally…")
 
-        // Generates audio without playing it through this phone's speaker.
         val result = tts.synthesizeToFile(
             text,
             Bundle(),
@@ -176,17 +225,25 @@ class VoiceSpeechSender(
             return
         }
 
-        // Recover if the TTS engine never completes.
         sendJob = scope.launch {
             delay(20_000)
+
             if (activeId == id) {
+                // Invalidate callbacks before stopping synthesis.
+                synchronized(lock) {
+                    activeId = null
+                }
+
                 tts.stop()
                 finish("Speech synthesis timed out. Try again.")
             }
         }
     }
 
-    private fun transmit(captured: CapturedAudio) {
+    private fun transmit(
+        id: String,
+        captured: CapturedAudio
+    ) {
         sendJob?.cancel()
 
         val rtc = engine ?: return
@@ -198,7 +255,10 @@ class VoiceSpeechSender(
                     toMono48k(captured)
                 }
 
-                report("Sending Voice audio…")
+                ensureActive()
+                if (activeId != id) return@launch
+
+                report("Sending generated audio…")
 
                 // 48 kHz × 10 ms × 2 bytes, mono.
                 val frameBytes = 960
@@ -206,10 +266,20 @@ class VoiceSpeechSender(
 
                 while (offset < pcm.size) {
                     ensureActive()
+                    if (activeId != id) return@launch
 
                     val frame = ByteArray(frameBytes)
-                    val count = min(frameBytes, pcm.size - offset)
-                    pcm.copyInto(frame, 0, offset, offset + count)
+                    val count = min(
+                        frameBytes,
+                        pcm.size - offset
+                    )
+
+                    pcm.copyInto(
+                        frame,
+                        destinationOffset = 0,
+                        startIndex = offset,
+                        endIndex = offset + count
+                    )
 
                     val result = rtc.pushExternalAudioFrame(
                         frame,
@@ -228,37 +298,66 @@ class VoiceSpeechSender(
                     delay(10)
                 }
 
-                finish("Voice audio sent. Confirm it on the other phone.")
+                finish(
+                    "Audio sent. Confirm it on the other phone."
+                )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {
-                finish(exception.message ?: "Unable to send audio.")
+                if (activeId == id) {
+                    finish(
+                        exception.message ?: "Unable to send audio."
+                    )
+                }
             }
         }
     }
 
-    private fun toMono48k(source: CapturedAudio): ByteArray {
-        require(source.encoding == AudioFormat.ENCODING_PCM_16BIT) {
-            "This test requires a TTS voice producing 16-bit PCM."
+    private fun toMono48k(
+        source: CapturedAudio
+    ): ByteArray {
+        require(
+            source.encoding == AudioFormat.ENCODING_PCM_16BIT
+        ) {
+            "This prototype requires a voice producing 16-bit PCM."
         }
-        require(source.rate > 0 && source.channels in 1..2) {
+
+        require(
+            source.rate > 0 && source.channels in 1..2
+        ) {
             "Unsupported TTS sample rate or channel count."
         }
+
         require(source.bytes.isNotEmpty()) {
             "The TTS engine returned no audio."
+        }
+
+        require(
+            source.bytes.size % (source.channels * 2) == 0
+        ) {
+            "The TTS engine returned incomplete PCM samples."
         }
 
         val samples = ByteBuffer.wrap(source.bytes)
             .order(ByteOrder.LITTLE_ENDIAN)
             .asShortBuffer()
-        val frameCount = samples.remaining() / source.channels
-        require(frameCount > 0)
+
+        val frameCount =
+            samples.remaining() / source.channels
+
+        require(frameCount > 0) {
+            "The TTS engine returned no complete audio frames."
+        }
 
         val mono = FloatArray(frameCount) { frame ->
             var sum = 0
+
             repeat(source.channels) { channel ->
-                sum += samples.get(frame * source.channels + channel).toInt()
+                sum += samples.get(
+                    frame * source.channels + channel
+                ).toInt()
             }
+
             sum.toFloat() / source.channels
         }
 
@@ -271,22 +370,34 @@ class VoiceSpeechSender(
             .order(ByteOrder.LITTLE_ENDIAN)
 
         repeat(outputCount) { index ->
-            val position = index.toDouble() * source.rate / 48_000
-            val left = position.toInt().coerceAtMost(mono.lastIndex)
+            val position =
+                index.toDouble() * source.rate / 48_000
+
+            val left = position.toInt()
+                .coerceAtMost(mono.lastIndex)
+
             val right = min(left + 1, mono.lastIndex)
             val fraction = (position - left).toFloat()
+
             val value = mono[left] +
                     (mono[right] - mono[left]) * fraction
 
             output.putShort(
-                value.toInt().coerceIn(-32768, 32767).toShort()
+                value.toInt()
+                    .coerceIn(-32768, 32767)
+                    .toShort()
             )
         }
 
         return output.array()
     }
 
-    private fun fail(id: String?, message: String) {
+    private fun fail(
+        id: String?,
+        message: String
+    ) {
+        if (id == null) return
+
         main.post {
             if (id == activeId && !closed) {
                 sendJob?.cancel()
@@ -300,22 +411,27 @@ class VoiceSpeechSender(
             activeId = null
             audio.reset()
         }
+
         engine = null
+        trackId = -1
         setBusy(false)
         report(message)
         outputFile.delete()
     }
 
-    // Call before destroying the Agora engine.
+    // Call from the main thread before destroying Agora.
     fun cancel() {
         synchronized(lock) {
             activeId = null
             audio.reset()
         }
+
         sendJob?.cancel()
         sendJob = null
+
         tts.stop()
         engine = null
+        trackId = -1
         setBusy(false)
     }
 
