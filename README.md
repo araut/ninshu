@@ -262,3 +262,11 @@ Built with Agora, Google ML Kit, Android speech APIs, and Vosk.
 Third-party SDKs and models retain their respective licenses and
 attribution requirements. Preserve model license notices and follow
 ML Kit translation attribution requirements.
+
+## License
+
+Ninshu's original source code is licensed under the
+[MIT License](LICENSE).
+
+Third-party SDKs, libraries, and models remain subject to their
+respective licenses and terms.
